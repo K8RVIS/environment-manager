@@ -163,7 +163,7 @@ class HandlerTests(unittest.TestCase):
 
         self.assertEqual(response["statusCode"], 200)
         payload = json.loads(response["body"])
-        self.assertEqual(payload["text"], "hello, world")
+        self.assertEqual(payload["text"], "hello, world!")
 
     def test_lambda_handler_formats_status_from_s3_state(self):
         module = load_module()
