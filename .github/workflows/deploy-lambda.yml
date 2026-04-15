@@ -196,11 +196,16 @@ jobs:
               --region "$AWS_REGION"
           fi
 
-      - name: Create or reuse Function URL
+      - name: Create or update Function URL
         run: |
           set -euo pipefail
 
           if aws lambda get-function-url-config --function-name "$FUNCTION_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+            aws lambda update-function-url-config \
+              --function-name "$FUNCTION_NAME" \
+              --auth-type NONE \
+              --region "$AWS_REGION" >/dev/null
+
             aws lambda get-function-url-config \
               --function-name "$FUNCTION_NAME" \
               --region "$AWS_REGION" \
@@ -215,20 +220,30 @@ jobs:
               --output text
           fi
 
-      - name: Ensure Function URL invoke permission
+      - name: Ensure Function URL invoke permissions
         run: |
           set -euo pipefail
 
           if aws lambda get-policy --function-name "$FUNCTION_NAME" --region "$AWS_REGION" >/tmp/function-policy.json 2>/dev/null; then
-            if grep -q "FunctionURLAllowPublicAccess" /tmp/function-policy.json; then
-              exit 0
-            fi
+            true
           fi
 
-          aws lambda add-permission \
-            --function-name "$FUNCTION_NAME" \
-            --statement-id FunctionURLAllowPublicAccess \
-            --action lambda:InvokeFunctionUrl \
-            --principal "*" \
-            --function-url-auth-type NONE \
-            --region "$AWS_REGION" >/dev/null
+          if ! grep -q "FunctionURLAllowPublicAccess" /tmp/function-policy.json 2>/dev/null; then
+            aws lambda add-permission \
+              --function-name "$FUNCTION_NAME" \
+              --statement-id FunctionURLAllowPublicAccess \
+              --action lambda:InvokeFunctionUrl \
+              --principal "*" \
+              --function-url-auth-type NONE \
+              --region "$AWS_REGION" >/dev/null
+          fi
+
+          if ! grep -q "FunctionURLInvokeAllowPublicAccess" /tmp/function-policy.json 2>/dev/null; then
+            aws lambda add-permission \
+              --function-name "$FUNCTION_NAME" \
+              --statement-id FunctionURLInvokeAllowPublicAccess \
+              --action lambda:InvokeFunction \
+              --principal "*" \
+              --invoked-via-function-url \
+              --region "$AWS_REGION" >/dev/null
+          fi
