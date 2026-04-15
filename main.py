@@ -112,6 +112,10 @@ def json_response(status_code: int, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def channel_response(text: str) -> dict[str, Any]:
+    return json_response(200, {"response_type": "in_channel", "text": text})
+
+
 def normalize_private_key(private_key_pem: str) -> str:
     normalized = private_key_pem.strip()
     if "\\n" in normalized:
@@ -272,11 +276,11 @@ def handle_command(command_name: str, slack_user_id: str, request_id: str) -> di
         return json_response(403, {"response_type": "ephemeral", "text": "허용되지 않은 사용자입니다."})
 
     if command_name == "hello":
-        return json_response(200, {"response_type": "ephemeral", "text": "hello, world!"})
+        return channel_response("hello, world!")
 
     if command_name == "status_dev":
         state = load_state()
-        return json_response(200, {"response_type": "ephemeral", "text": format_status_message(state)})
+        return channel_response(format_status_message(state))
 
     if command_name not in {"start_dev", "stop_dev"}:
         return json_response(400, {"response_type": "ephemeral", "text": f"지원하지 않는 명령어입니다: /{command_name}"})
@@ -293,13 +297,7 @@ def handle_command(command_name: str, slack_user_id: str, request_id: str) -> di
             "request_id": request_id,
         },
     )
-    return json_response(
-        200,
-        {
-            "response_type": "ephemeral",
-            "text": f"`/{command_name}` 요청을 접수했습니다. `/status_dev`로 확인하세요.",
-        },
-    )
+    return channel_response(f"`/{command_name}` 요청을 접수했습니다. `/status_dev`로 확인하세요.")
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:

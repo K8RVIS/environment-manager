@@ -132,6 +132,8 @@ class HandlerTests(unittest.TestCase):
 
         self.assertEqual(response["statusCode"], 200)
         dispatch_workflow.assert_called_once()
+        payload = json.loads(response["body"])
+        self.assertEqual(payload["response_type"], "in_channel")
         dispatch_kwargs = dispatch_workflow.call_args.kwargs
         self.assertEqual(dispatch_kwargs["owner"], "K8RVIS")
         self.assertEqual(dispatch_kwargs["repo"], "eks-secure-infra")
@@ -163,6 +165,7 @@ class HandlerTests(unittest.TestCase):
 
         self.assertEqual(response["statusCode"], 200)
         payload = json.loads(response["body"])
+        self.assertEqual(payload["response_type"], "in_channel")
         self.assertEqual(payload["text"], "hello, world!")
 
     def test_lambda_handler_formats_status_from_s3_state(self):
@@ -198,6 +201,7 @@ class HandlerTests(unittest.TestCase):
 
         self.assertEqual(response["statusCode"], 200)
         payload = json.loads(response["body"])
+        self.assertEqual(payload["response_type"], "in_channel")
         self.assertIn("환경 상태: 실습 가능", payload["text"])
         self.assertIn("현재 실습 중: <@U123> (team-a), <@U789> (team-c)", payload["text"])
         self.assertIn("현재 namespace: team-a, team-c", payload["text"])
@@ -238,6 +242,7 @@ class HandlerTests(unittest.TestCase):
 
         self.assertEqual(response["statusCode"], 200)
         payload = json.loads(response["body"])
+        self.assertEqual(payload["response_type"], "in_channel")
         self.assertIn("환경 상태: 생성 중", payload["text"])
         self.assertIn("진행 중 작업: start(team-c)", payload["text"])
 
