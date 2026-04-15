@@ -136,7 +136,6 @@ jobs:
 
           payload = {
               "Variables": {
-                  "AWS_REGION": os.environ["AWS_REGION"],
                   "SLACK_SIGNING_SECRET": os.environ["SLACK_SIGNING_SECRET"],
                   "SLACK_USER_NAMESPACE_MAP": os.environ["SLACK_USER_NAMESPACE_MAP"],
                   "GITHUB_APP_ID": os.environ["GH_APP_ID"],
