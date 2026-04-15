@@ -1,0 +1,235 @@
+name: Deploy Environment Manager Lambda
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/deploy-lambda.yml"
+      - "Dockerfile"
+      - "main.py"
+      - "requirements.txt"
+      - "tests/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: environment-manager-deploy
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: test
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      AWS_ROLE_TO_ASSUME: ${{ vars.AWS_ROLE_TO_ASSUME }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      FUNCTION_NAME: ${{ vars.LAMBDA_FUNCTION_NAME }}
+      LAMBDA_EXECUTION_ROLE_ARN: ${{ vars.LAMBDA_EXECUTION_ROLE_ARN }}
+      TARGET_REPO_OWNER: ${{ vars.TARGET_REPO_OWNER }}
+      TARGET_REPO_NAME: ${{ vars.TARGET_REPO_NAME }}
+      TARGET_WORKFLOW_FILENAME: ${{ vars.TARGET_WORKFLOW_FILENAME }}
+      TARGET_WORKFLOW_REF: ${{ vars.TARGET_WORKFLOW_REF }}
+      GH_APP_ID: ${{ vars.GH_APP_ID }}
+      GH_INSTALLATION_ID: ${{ vars.GH_INSTALLATION_ID }}
+      STATE_BUCKET: ${{ vars.STATE_BUCKET }}
+      STATE_KEY: ${{ vars.STATE_KEY }}
+      SLACK_USER_NAMESPACE_MAP: ${{ vars.SLACK_USER_NAMESPACE_MAP }}
+      SLACK_SIGNING_SECRET: ${{ secrets.SLACK_SIGNING_SECRET }}
+      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate deployment configuration
+        run: |
+          set -euo pipefail
+
+          required_vars=(
+            AWS_REGION
+            AWS_ACCOUNT_ID
+            AWS_ROLE_TO_ASSUME
+            ECR_REPOSITORY
+            FUNCTION_NAME
+            LAMBDA_EXECUTION_ROLE_ARN
+            TARGET_REPO_OWNER
+            TARGET_REPO_NAME
+            GH_APP_ID
+            GH_INSTALLATION_ID
+            STATE_BUCKET
+            STATE_KEY
+            SLACK_USER_NAMESPACE_MAP
+            SLACK_SIGNING_SECRET
+            GH_APP_PRIVATE_KEY
+          )
+
+          for name in "${required_vars[@]}"; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::$name is required for deployment."
+              exit 1
+            fi
+          done
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          role-session-name: github-actions-environment-manager
+
+      - name: Ensure ECR repository exists
+        run: |
+          set -euo pipefail
+          if aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" --region "$AWS_REGION" >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          aws ecr create-repository \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-scanning-configuration scanOnPush=true \
+            --region "$AWS_REGION" >/dev/null
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Lambda image
+        run: |
+          set -euo pipefail
+          IMAGE_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:${GITHUB_SHA}"
+          docker build -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+          echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
+
+      - name: Build Lambda environment payload
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+
+          payload = {
+              "Variables": {
+                  "AWS_REGION": os.environ["AWS_REGION"],
+                  "SLACK_SIGNING_SECRET": os.environ["SLACK_SIGNING_SECRET"],
+                  "SLACK_USER_NAMESPACE_MAP": os.environ["SLACK_USER_NAMESPACE_MAP"],
+                  "GITHUB_APP_ID": os.environ["GH_APP_ID"],
+                  "GITHUB_APP_PRIVATE_KEY": os.environ["GH_APP_PRIVATE_KEY"],
+                  "GITHUB_INSTALLATION_ID": os.environ["GH_INSTALLATION_ID"],
+                  "GITHUB_TARGET_OWNER": os.environ["TARGET_REPO_OWNER"],
+                  "GITHUB_TARGET_REPO": os.environ["TARGET_REPO_NAME"],
+                  "GITHUB_WORKFLOW_FILENAME": os.environ.get("TARGET_WORKFLOW_FILENAME", "orchestrate-environment.yml"),
+                  "GITHUB_WORKFLOW_REF": os.environ.get("TARGET_WORKFLOW_REF", "main"),
+                  "STATE_BUCKET": os.environ["STATE_BUCKET"],
+                  "STATE_KEY": os.environ["STATE_KEY"],
+              }
+          }
+
+          with open("lambda-env.json", "w", encoding="utf-8") as file:
+              json.dump(payload, file)
+          PY
+
+      - name: Create or update Lambda function
+        run: |
+          set -euo pipefail
+
+          if aws lambda get-function --function-name "$FUNCTION_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+            aws lambda update-function-code \
+              --function-name "$FUNCTION_NAME" \
+              --image-uri "$IMAGE_URI" \
+              --region "$AWS_REGION" >/dev/null
+
+            aws lambda wait function-updated \
+              --function-name "$FUNCTION_NAME" \
+              --region "$AWS_REGION"
+
+            aws lambda update-function-configuration \
+              --function-name "$FUNCTION_NAME" \
+              --role "$LAMBDA_EXECUTION_ROLE_ARN" \
+              --timeout 30 \
+              --memory-size 512 \
+              --environment file://lambda-env.json \
+              --region "$AWS_REGION" >/dev/null
+
+            aws lambda wait function-updated \
+              --function-name "$FUNCTION_NAME" \
+              --region "$AWS_REGION"
+          else
+            aws lambda create-function \
+              --function-name "$FUNCTION_NAME" \
+              --package-type Image \
+              --code ImageUri="$IMAGE_URI" \
+              --role "$LAMBDA_EXECUTION_ROLE_ARN" \
+              --architectures x86_64 \
+              --timeout 30 \
+              --memory-size 512 \
+              --environment file://lambda-env.json \
+              --region "$AWS_REGION" >/dev/null
+
+            aws lambda wait function-active \
+              --function-name "$FUNCTION_NAME" \
+              --region "$AWS_REGION"
+          fi
+
+      - name: Create or reuse Function URL
+        run: |
+          set -euo pipefail
+
+          if aws lambda get-function-url-config --function-name "$FUNCTION_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+            aws lambda get-function-url-config \
+              --function-name "$FUNCTION_NAME" \
+              --region "$AWS_REGION" \
+              --query 'FunctionUrl' \
+              --output text
+          else
+            aws lambda create-function-url-config \
+              --function-name "$FUNCTION_NAME" \
+              --auth-type NONE \
+              --region "$AWS_REGION" \
+              --query 'FunctionUrl' \
+              --output text
+          fi
+
+      - name: Ensure Function URL invoke permission
+        run: |
+          set -euo pipefail
+
+          if aws lambda get-policy --function-name "$FUNCTION_NAME" --region "$AWS_REGION" >/tmp/function-policy.json 2>/dev/null; then
+            if grep -q "FunctionURLAllowPublicAccess" /tmp/function-policy.json; then
+              exit 0
+            fi
+          fi
+
+          aws lambda add-permission \
+            --function-name "$FUNCTION_NAME" \
+            --statement-id FunctionURLAllowPublicAccess \
+            --action lambda:InvokeFunctionUrl \
+            --principal "*" \
+            --function-url-auth-type NONE \
+            --region "$AWS_REGION" >/dev/null
